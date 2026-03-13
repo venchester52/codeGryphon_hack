@@ -17,6 +17,9 @@ def detect_weak_reasons(row: pd.Series, metrics_info: dict[str, Any]) -> list[st
     if "ctr" in calculated_keys and float(row.get("ctr", 0.0)) < 1.0:
         reasons.append("Низкий CTR (< 1%)")
 
+    if "conversion_rate" in calculated_keys and float(row.get("conversion_rate", 0.0)) < 1.5:
+        reasons.append("Низкий Conversion Rate (< 1.5%)")
+
     if "cvr" in calculated_keys and float(row.get("cvr", 0.0)) < 1.5:
         reasons.append("Низкий CVR (< 1.5%)")
 
@@ -29,17 +32,20 @@ def detect_weak_reasons(row: pd.Series, metrics_info: dict[str, Any]) -> list[st
     if "cpa" in calculated_keys and float(row.get("cpa", 0.0)) > 100:
         reasons.append("Высокий CPA (> 100)")
 
-    if "cpl" in calculated_keys and float(row.get("cpl", 0.0)) > 80:
-        reasons.append("Высокий CPL (> 80)")
-
     if "cac" in calculated_keys and float(row.get("cac", 0.0)) > 200:
         reasons.append("Высокий CAC (> 200)")
 
     if "roas" in calculated_keys and float(row.get("roas", 0.0)) < 1.2:
         reasons.append("Низкий ROAS (< 1.2)")
 
-    if "roi" in calculated_keys and float(row.get("roi", 0.0)) < 0:
-        reasons.append("Отрицательный ROI/ROMI")
+    if "romi" in calculated_keys and float(row.get("romi", 0.0)) < 0:
+        reasons.append("Отрицательный ROMI")
+
+    if "bounce_rate" in calculated_keys and float(row.get("bounce_rate", 0.0)) > 70:
+        reasons.append("Высокий Bounce Rate (> 70%)")
+
+    if "engagement_rate" in calculated_keys and float(row.get("engagement_rate", 0.0)) < 30:
+        reasons.append("Низкий Engagement Rate (< 30%)")
 
     if _has_metric(pd.DataFrame([row]), "spend") and float(row.get("spend", 0.0)) > 0:
         conversion_field = metrics_info.get("conversion_field")
@@ -76,20 +82,23 @@ def _top_metric_recommendations(df: pd.DataFrame, metrics_info: dict[str, Any]) 
     if "cvr" in calculated_keys and (weak_df["cvr"] < 1.5).any():
         tips.append("CVR проседает: проверьте посадочную страницу, форму заявки и релевантность оффера.")
 
+    if "conversion_rate" in calculated_keys and (weak_df["conversion_rate"] < 1.5).any() and len(tips) < 5:
+        tips.append("Падает общий Conversion Rate: проверьте качество трафика и этапы постклика.")
+
     if "cpm" in calculated_keys and (weak_df["cpm"] > 300).any():
         tips.append("CPM высокий: пересмотрите аудитории, плейсменты и частоту показов.")
 
     if "roas" in calculated_keys and (weak_df["roas"] < 1.2).any():
         tips.append("ROAS низкий: перераспределите бюджет в объявления с лучшей окупаемостью.")
 
-    if "cpl" in calculated_keys and (weak_df["cpl"] > 80).any():
-        tips.append("CPL высокий: оптимизируйте верх воронки и качество лид-форм.")
-
     if "cac" in calculated_keys and (weak_df["cac"] > 200).any():
         tips.append("CAC высокий: сократите потери между лидом и продажей, усилите квалификацию лидов.")
 
-    if "cpa" in calculated_keys and (weak_df["cpa"] > 100).any() and len(tips) < 4:
-        tips.append("CPA высокий: отключите неэффективные связки и направьте бюджет в лучшие объявления.")
+    if "romi" in calculated_keys and (weak_df["romi"] < 0).any() and len(tips) < 5:
+        tips.append("ROMI отрицательный: ограничьте убыточные кампании и усилите прибыльные сегменты.")
+
+    if "bounce_rate" in calculated_keys and (weak_df["bounce_rate"] > 70).any() and len(tips) < 5:
+        tips.append("Высокий Bounce Rate: улучшите соответствие посадочной страницы и рекламного обещания.")
 
     return tips
 
@@ -109,4 +118,4 @@ def generate_recommendations(df: pd.DataFrame, metrics_info: dict[str, Any]) -> 
             "Есть слабые объявления, но данных по расширенным метрикам мало. Соберите больше статистики для точной оптимизации."
         ]
 
-    return recommendations[:4]
+    return recommendations[:5]

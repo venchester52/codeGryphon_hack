@@ -6,26 +6,74 @@ from typing import Any
 import pandas as pd
 
 INTERNAL_SCHEMA = [
+    {"field": "date", "required": False, "type": "date"},
+    {"field": "channel", "required": False, "type": "text"},
+    {"field": "source", "required": False, "type": "text"},
+    {"field": "medium", "required": False, "type": "text"},
     {"field": "campaign", "required": False, "type": "text"},
+    {"field": "ad_group", "required": False, "type": "text"},
     {"field": "ad_name", "required": False, "type": "text"},
+    {"field": "device", "required": False, "type": "text"},
+    {"field": "geo", "required": False, "type": "text"},
+    {"field": "platform", "required": False, "type": "text"},
+    {"field": "audience", "required": False, "type": "text"},
+    {"field": "customer_type", "required": False, "type": "text"},
     {"field": "impressions", "required": True, "type": "numeric"},
     {"field": "clicks", "required": True, "type": "numeric"},
     {"field": "spend", "required": True, "type": "numeric"},
+    {"field": "sessions", "required": False, "type": "numeric"},
+    {"field": "users", "required": False, "type": "numeric"},
+    {"field": "new_users", "required": False, "type": "numeric"},
+    {"field": "returning_users", "required": False, "type": "numeric"},
+    {"field": "bounces", "required": False, "type": "numeric"},
+    {"field": "engaged_sessions", "required": False, "type": "numeric"},
     {"field": "conversions", "required": False, "type": "numeric"},
     {"field": "leads", "required": False, "type": "numeric"},
     {"field": "customers", "required": False, "type": "numeric"},
     {"field": "orders", "required": False, "type": "numeric"},
+    {"field": "repeat_purchases", "required": False, "type": "numeric"},
     {"field": "revenue", "required": False, "type": "numeric"},
     {"field": "sales_value", "required": False, "type": "numeric"},
     {"field": "profit", "required": False, "type": "numeric"},
+    {"field": "ltv_value", "required": False, "type": "numeric"},
 ]
 
 FIELD_PROFILES = {
+    "date": {
+        "keywords": ["date", "day", "report_date", "event_date", "timestamp", "дата", "день"],
+    },
+    "channel": {
+        "keywords": ["channel", "канал", "traffic_channel", "utm_channel"],
+    },
+    "source": {
+        "keywords": ["source", "источник", "utm_source"],
+    },
+    "medium": {
+        "keywords": ["medium", "канал_типа", "utm_medium"],
+    },
     "campaign": {
-        "keywords": ["campaign", "camp", "кампан", "group", "grp", "set"],
+        "keywords": ["campaign", "camp", "кампан", "group", "grp", "set", "utm_campaign"],
+    },
+    "ad_group": {
+        "keywords": ["adgroup", "ad_group", "adset", "группа", "группа_объявлений"],
     },
     "ad_name": {
         "keywords": ["ad", "creative", "banner", "name", "title", "объяв", "креатив"],
+    },
+    "device": {
+        "keywords": ["device", "platform_device", "устройство"],
+    },
+    "geo": {
+        "keywords": ["geo", "region", "country", "city", "гео", "регион", "страна", "город"],
+    },
+    "platform": {
+        "keywords": ["platform", "os", "placement", "платформа", "плейсмент"],
+    },
+    "audience": {
+        "keywords": ["audience", "segment", "interest", "аудитория", "сегмент"],
+    },
+    "customer_type": {
+        "keywords": ["customer_type", "user_type", "new_returning", "тип_клиента", "тип_пользователя"],
     },
     "impressions": {
         "keywords": ["impression", "impr", "view", "show", "показ", "охват", "reach"],
@@ -35,6 +83,24 @@ FIELD_PROFILES = {
     },
     "spend": {
         "keywords": ["spend", "cost", "amount", "budget", "расход", "затрат", "цена"],
+    },
+    "sessions": {
+        "keywords": ["session", "visit", "сеанс", "сесс"],
+    },
+    "users": {
+        "keywords": ["users", "user", "visitors", "пользоват"],
+    },
+    "new_users": {
+        "keywords": ["new_users", "new_user", "новые", "новый_пользователь"],
+    },
+    "returning_users": {
+        "keywords": ["returning", "repeat_users", "вернув", "повторные_пользователи"],
+    },
+    "bounces": {
+        "keywords": ["bounce", "отказ"],
+    },
+    "engaged_sessions": {
+        "keywords": ["engaged", "engagement", "вовлеч"],
     },
     "conversions": {
         "keywords": ["conversion", "conv", "goal", "action", "конверс", "целев"],
@@ -48,6 +114,9 @@ FIELD_PROFILES = {
     "orders": {
         "keywords": ["order", "purchase", "deal", "заказ", "покупк"],
     },
+    "repeat_purchases": {
+        "keywords": ["repeat_purchase", "repeat_order", "повтор", "reorder"],
+    },
     "revenue": {
         "keywords": ["revenue", "income", "gmv", "выруч", "доход"],
     },
@@ -56,6 +125,9 @@ FIELD_PROFILES = {
     },
     "profit": {
         "keywords": ["profit", "margin", "маржа", "прибыл"],
+    },
+    "ltv_value": {
+        "keywords": ["ltv", "lifetime_value", "clv", "ценность_клиента"],
     },
 }
 
@@ -83,12 +155,18 @@ def _to_numeric_series(series: pd.Series) -> pd.Series:
     return pd.to_numeric(cleaned, errors="coerce")
 
 
+def _to_datetime_series(series: pd.Series) -> pd.Series:
+    return pd.to_datetime(series, errors="coerce", utc=False)
+
+
 def _build_column_profile(series: pd.Series, source_name: str) -> dict[str, Any]:
     non_null = series.dropna()
     numeric_series = _to_numeric_series(series)
     numeric_non_null = numeric_series.dropna()
+    datetime_non_null = _to_datetime_series(series).dropna()
 
     numeric_ratio = float(len(numeric_non_null) / len(series)) if len(series) else 0.0
+    date_ratio = float(len(datetime_non_null) / len(series)) if len(series) else 0.0
     non_null_ratio = float(len(non_null) / len(series)) if len(series) else 0.0
 
     positive_ratio = 0.0
@@ -108,6 +186,7 @@ def _build_column_profile(series: pd.Series, source_name: str) -> dict[str, Any]
         "normalized_name": normalize_column_name(source_name),
         "tokens": _tokenize(source_name),
         "numeric_ratio": numeric_ratio,
+        "date_ratio": date_ratio,
         "non_null_ratio": non_null_ratio,
         "positive_ratio": positive_ratio,
         "decimal_ratio": decimal_ratio,
@@ -132,28 +211,41 @@ def _keyword_score(name: str, field: str) -> float:
 
 
 def _type_score(profile: dict[str, Any], field: str) -> float:
+    date_fields = {"date"}
     numeric_fields = {
         "impressions",
         "clicks",
         "spend",
+        "sessions",
+        "users",
+        "new_users",
+        "returning_users",
+        "bounces",
+        "engaged_sessions",
         "conversions",
         "leads",
         "customers",
         "orders",
+        "repeat_purchases",
         "revenue",
         "sales_value",
         "profit",
+        "ltv_value",
     }
+
+    if field in date_fields:
+        return min(profile["date_ratio"] * 0.9 + profile["non_null_ratio"] * 0.1, 1.0)
+
     if field in numeric_fields:
         score = profile["numeric_ratio"] * 0.8 + profile["positive_ratio"] * 0.2
-        if field in {"spend", "revenue", "sales_value", "profit"}:
+        if field in {"spend", "revenue", "sales_value", "profit", "ltv_value"}:
             score += profile["decimal_ratio"] * 0.2
         if field == "impressions" and profile["mean_value"] >= 100:
             score += 0.2
         if field == "clicks" and 0 < profile["mean_value"] <= 5000:
             score += 0.1
-        if field in {"conversions", "leads", "customers", "orders"} and profile["mean_value"] <= 500:
-            score += 0.15
+        if field in {"conversions", "leads", "customers", "orders"} and profile["mean_value"] <= 2000:
+            score += 0.1
         return min(score, 1.0)
 
     text_score = 1.0 - profile["numeric_ratio"]
@@ -265,6 +357,9 @@ def build_internal_dataframe(raw_df: pd.DataFrame, mapping: dict[str, str | None
         if schema_item["type"] == "numeric":
             numeric_series = _to_numeric_series(source_series).fillna(0)
             result[field] = numeric_series
+        elif schema_item["type"] == "date":
+            dt_series = _to_datetime_series(source_series)
+            result[field] = dt_series
         else:
             result[field] = source_series.astype(str).fillna("").replace({"nan": "", "None": ""})
 
@@ -272,19 +367,32 @@ def build_internal_dataframe(raw_df: pd.DataFrame, mapping: dict[str, str | None
         "impressions",
         "clicks",
         "spend",
+        "sessions",
+        "users",
+        "new_users",
+        "returning_users",
+        "bounces",
+        "engaged_sessions",
         "conversions",
         "leads",
         "customers",
         "orders",
+        "repeat_purchases",
         "revenue",
         "sales_value",
+        "ltv_value",
     }
     for field in non_negative_fields:
-        result[field] = result[field].clip(lower=0)
+        if field in result.columns:
+            result[field] = result[field].clip(lower=0)
 
-    result["campaign"] = result["campaign"].replace("", "Не указана кампания")
-    empty_ad_mask = result["ad_name"].str.strip() == ""
-    result.loc[empty_ad_mask, "ad_name"] = [f"Объявление {idx + 1}" for idx in range(empty_ad_mask.sum())]
+    if "channel" in result.columns:
+        result["channel"] = result["channel"].replace("", "Не указан канал")
+    if "campaign" in result.columns:
+        result["campaign"] = result["campaign"].replace("", "Не указана кампания")
+    if "ad_name" in result.columns:
+        empty_ad_mask = result["ad_name"].str.strip() == ""
+        result.loc[empty_ad_mask, "ad_name"] = [f"Объявление {idx + 1}" for idx in range(empty_ad_mask.sum())]
 
     return result
 

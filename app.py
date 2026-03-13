@@ -46,20 +46,56 @@ def inject_base_styles() -> None:
     st.markdown(
         """
         <style>
+            [data-testid="stSidebar"] {
+                display: none;
+            }
             div.block-container {
-                padding-top: 1.2rem;
-                padding-bottom: 1.5rem;
+                padding-top: 0.85rem;
+                padding-bottom: 1.2rem;
             }
-            .section-card {
-                border: 1px solid rgba(49, 51, 63, 0.2);
+            .top-nav {
+                border: 1px solid rgba(15, 23, 42, 0.08);
                 border-radius: 12px;
-                padding: 0.9rem 1rem;
-                margin-bottom: 0.8rem;
-                background: rgba(250, 250, 252, 0.6);
+                padding: 0.45rem 0.7rem;
+                background: #ffffff;
+                margin-bottom: 0.95rem;
             }
-            .muted-caption {
+            .top-nav-title {
+                color: #111827;
+                font-size: 0.95rem;
+                font-weight: 600;
+                line-height: 1.2;
+                margin-top: 0.12rem;
+            }
+            .top-nav-subtitle {
                 color: #6b7280;
-                font-size: 0.9rem;
+                font-size: 0.82rem;
+                line-height: 1.25;
+                margin-top: 0.1rem;
+            }
+            .top-nav div.stButton > button {
+                height: 2.2rem;
+                border-radius: 10px;
+                border: 1px solid rgba(15, 23, 42, 0.12);
+                background: #f8fafc;
+                color: #0f172a;
+                font-weight: 700;
+                letter-spacing: 0.01em;
+            }
+            .panel-title {
+                color: #111827;
+                font-weight: 600;
+                margin-bottom: 0.15rem;
+            }
+            .control-panel-caption {
+                color: #6b7280;
+                font-size: 0.82rem;
+                margin-bottom: 0.4rem;
+            }
+            div[data-testid="stVerticalBlockBorderWrapper"] {
+                border: 1px solid rgba(15, 23, 42, 0.08) !important;
+                border-radius: 12px !important;
+                background: #ffffff;
             }
         </style>
         """,
@@ -72,31 +108,26 @@ def format_metric_value(value: float, unit: str) -> str:
         return f"{value:.2f}%"
     if unit == "x":
         return f"{value:.2f}x"
-    return f"{value:.2f}"
+    if unit == "₽":
+        return f"{value:,.2f} ₽".replace(",", " ")
+    return f"{value:,.2f}".replace(",", " ")
 
 
 def build_results_table(df: pd.DataFrame, metrics_info: dict[str, Any]) -> pd.DataFrame:
-    base_columns = [
-        "campaign",
-        "ad_name",
-        "impressions",
-        "clicks",
-        "spend",
-        "conversions",
-        "leads",
-        "customers",
-        "orders",
-        "revenue",
-        "sales_value",
-        "profit",
-    ]
-
+    schema_columns = [item["field"] for item in INTERNAL_SCHEMA if item["field"] in df.columns]
     metric_columns = [metric["key"] for metric in metrics_info.get("calculated", []) if metric["key"] in df.columns]
-    present_base = [column for column in base_columns if column in df.columns]
 
-    table = df[present_base + metric_columns + ["is_weak", "weak_reasons"]].copy()
-    for column in metric_columns:
-        table[column] = table[column].round(2)
+    output_columns = schema_columns + metric_columns
+    if "is_weak" in df.columns:
+        output_columns.append("is_weak")
+    if "weak_reasons" in df.columns:
+        output_columns.append("weak_reasons")
+
+    table = df[output_columns].copy()
+
+    for column in table.columns:
+        if pd.api.types.is_numeric_dtype(table[column]):
+            table[column] = table[column].round(2)
 
     return table
 
@@ -106,12 +137,31 @@ def show_kpi_cards(summary_kpis: dict[str, dict[str, Any]]) -> None:
         st.info("Сводные KPI недоступны: недостаточно данных для расчета метрик.")
         return
 
-    ordered_metrics = list(summary_kpis.values())
-    for start in range(0, len(ordered_metrics), 4):
-        row_metrics = ordered_metrics[start : start + 4]
-        cols = st.columns(len(row_metrics))
-        for idx, metric in enumerate(row_metrics):
-            cols[idx].metric(metric["label"], format_metric_value(metric["value"], metric["unit"]))
+    preferred_order = [
+        "impressions",
+        "clicks",
+        "spend",
+        "sessions",
+        "users",
+        "conversions",
+        "conversion_rate",
+        "cpc",
+        "cpa",
+        "revenue",
+        "roas",
+        "romi",
+    ]
+
+    ordered_keys = [key for key in preferred_order if key in summary_kpis]
+    fallback_keys = [key for key in summary_kpis.keys() if key not in ordered_keys]
+    render_keys = (ordered_keys + fallback_keys)[:16]
+
+    for start in range(0, len(render_keys), 4):
+        row_keys = render_keys[start : start + 4]
+        cols = st.columns(len(row_keys))
+        for idx, key in enumerate(row_keys):
+            metric = summary_kpis[key]
+            cols[idx].metric(metric["label"], format_metric_value(float(metric["value"]), metric["unit"]))
 
 
 def show_detected_metrics(metrics_info: dict[str, Any]) -> None:
@@ -133,7 +183,12 @@ def show_detected_metrics(metrics_info: dict[str, Any]) -> None:
         if not unavailable:
             st.write("- Все основные метрики доступны.")
         for metric in unavailable:
-            st.write(f"- **{metric['label']}**: {metric['reason']}")
+            reason = metric.get("reason", "Причина не указана")
+            proxy = metric.get("proxy", "")
+            if proxy:
+                st.write(f"- **{metric['label']}**: {reason} Прокси: {proxy}")
+            else:
+                st.write(f"- **{metric['label']}**: {reason}")
 
 
 def format_ad_metric_block(row: pd.Series, metric_keys: list[str]) -> str:
@@ -159,7 +214,13 @@ def select_metric_ranking(df: pd.DataFrame, metric_key: str, direction: str, lim
         return pd.DataFrame()
 
     ascending = direction == "lower"
-    ranked = df.copy().sort_values(by=[metric_key, "spend"], ascending=[ascending, False])
+    sort_cols = [metric_key]
+    ascending_flags = [ascending]
+    if "spend" in df.columns:
+        sort_cols.append("spend")
+        ascending_flags.append(False)
+
+    ranked = df.copy().sort_values(by=sort_cols, ascending=ascending_flags)
     return ranked.head(limit)
 
 
@@ -171,7 +232,7 @@ def build_campaign_context(
 ) -> str:
     calculated_metrics = metrics_info.get("calculated", [])
     unavailable_metrics = metrics_info.get("unavailable", [])
-    weak_ads_df = analyzed_df[analyzed_df["is_weak"]].copy()
+    weak_ads_df = analyzed_df[analyzed_df["is_weak"]].copy() if "is_weak" in analyzed_df.columns else pd.DataFrame()
 
     lines: list[str] = ["Контекст кампании (текущий загруженный файл):", "", "Сводные KPI:"]
 
@@ -191,7 +252,11 @@ def build_campaign_context(
     lines.append("Недоступные метрики и причины:")
     if unavailable_metrics:
         for metric in unavailable_metrics:
-            lines.append(f"- {metric['label']}: {metric['reason']}")
+            proxy = metric.get("proxy", "")
+            if proxy:
+                lines.append(f"- {metric['label']}: {metric['reason']} Прокси: {proxy}")
+            else:
+                lines.append(f"- {metric['label']}: {metric['reason']}")
     else:
         lines.append("- Все основные метрики доступны.")
 
@@ -248,11 +313,24 @@ def init_app_state() -> None:
         "dashboard_chart_type": "bar",
         "dashboard_top_n": 10,
         "dashboard_weak_only": False,
+        "show_home_screen": True,
+        "uploader_nonce": 0,
     }
 
     for key, value in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = value
+
+
+def reset_to_home_screen() -> None:
+    st.session_state.show_home_screen = True
+    st.session_state.dashboard_enabled = False
+    st.session_state.dashboard_group_field = "campaign"
+    st.session_state.dashboard_metric_key = "spend"
+    st.session_state.dashboard_chart_type = "bar"
+    st.session_state.dashboard_top_n = 10
+    st.session_state.dashboard_weak_only = False
+    st.session_state.uploader_nonce = int(st.session_state.uploader_nonce) + 1
 
 
 def clear_auth_state() -> None:
@@ -264,6 +342,7 @@ def clear_auth_state() -> None:
     st.session_state.active_analysis_session_id = None
     st.session_state.active_analysis_payload = None
     st.session_state.last_saved_analysis_hash = ""
+    st.session_state.show_home_screen = True
 
 
 def build_analysis_signature(
@@ -288,18 +367,36 @@ def build_analysis_signature(
 
 def schema_field_labels() -> dict[str, str]:
     return {
+        "date": "Дата (date)",
+        "channel": "Канал (channel)",
+        "source": "Источник (source)",
+        "medium": "Medium (medium)",
         "campaign": "Кампания (campaign)",
+        "ad_group": "Группа объявлений (ad_group)",
         "ad_name": "Объявление (ad_name)",
+        "device": "Устройство (device)",
+        "geo": "Гео (geo)",
+        "platform": "Платформа (platform)",
+        "audience": "Аудитория (audience)",
+        "customer_type": "Тип клиента (customer_type)",
         "impressions": "Показы (impressions)",
         "clicks": "Клики (clicks)",
         "spend": "Расход (spend)",
+        "sessions": "Сессии (sessions)",
+        "users": "Пользователи (users)",
+        "new_users": "Новые пользователи (new_users)",
+        "returning_users": "Вернувшиеся пользователи (returning_users)",
+        "bounces": "Отказы (bounces)",
+        "engaged_sessions": "Вовлеченные сессии (engaged_sessions)",
         "conversions": "Конверсии (conversions)",
         "leads": "Лиды (leads)",
         "customers": "Клиенты (customers)",
         "orders": "Заказы (orders)",
+        "repeat_purchases": "Повторные покупки (repeat_purchases)",
         "revenue": "Выручка (revenue)",
         "sales_value": "Сумма продаж (sales_value)",
         "profit": "Прибыль (profit)",
+        "ltv_value": "LTV значение (ltv_value)",
     }
 
 
@@ -328,7 +425,7 @@ def render_manual_mapping_form(
         for schema_item in INTERNAL_SCHEMA:
             field = schema_item["field"]
             is_required = schema_item["required"]
-            label = labels[field]
+            label = labels.get(field, field)
             if is_required:
                 label = f"{label} *"
 
@@ -619,7 +716,7 @@ def get_user_sessions(limit: int = 20) -> list[Any]:
         return get_user_analysis_sessions(db, user_id=int(st.session_state.auth_user_id), limit=limit)
 
 
-def open_session_from_sidebar() -> None:
+def open_session_from_panel() -> None:
     sessions = get_user_sessions(limit=20)
     if not sessions:
         st.caption("Сохраненных сессий пока нет.")
@@ -629,10 +726,11 @@ def open_session_from_sidebar() -> None:
         f"#{row.id} • {row.original_filename} • {row.uploaded_at.strftime('%Y-%m-%d %H:%M')}": row.id
         for row in sessions
     }
-    selected = st.selectbox("Последние сессии", options=list(options.keys()), key="sidebar_saved_session")
+    selected = st.selectbox("Последние сессии", options=list(options.keys()), key="panel_saved_session")
     if st.button("Открыть сессию", use_container_width=True, key="open_saved_session_btn"):
         try:
             load_saved_session(options[selected])
+            st.session_state.show_home_screen = False
             st.success("Сессия загружена.")
             st.rerun()
         except ValueError as error:
@@ -768,7 +866,11 @@ def render_results_tab(analyzed_df: pd.DataFrame, metrics_info: dict[str, Any]) 
         if not unavailable:
             st.write("Все метрики доступны.")
         for metric in unavailable:
-            st.write(f"- **{metric['label']}**: {metric['reason']}")
+            proxy = metric.get("proxy", "")
+            if proxy:
+                st.write(f"- **{metric['label']}**: {metric['reason']} Прокси: {proxy}")
+            else:
+                st.write(f"- **{metric['label']}**: {metric['reason']}")
 
     st.markdown("#### Таблица результатов")
     st.dataframe(build_results_table(analyzed_df, metrics_info), use_container_width=True)
@@ -832,6 +934,7 @@ def render_history_tab() -> None:
     if st.button("Открыть выбранную сессию", key="history_open_btn"):
         try:
             load_saved_session(session_id=options[selected_label])
+            st.session_state.show_home_screen = False
             st.success("Сессия загружена. Контекст и история чата восстановлены.")
             st.rerun()
         except ValueError as error:
@@ -840,29 +943,49 @@ def render_history_tab() -> None:
             st.error("Не удалось открыть сессию. Попробуйте снова.")
 
 
-def render_sidebar_header() -> None:
-    st.sidebar.markdown("## Навигация и фильтры")
-    st.sidebar.caption("Все глобальные действия вынесены в боковую панель.")
+def render_top_navigation() -> None:
+    st.markdown("<div class='top-nav'>", unsafe_allow_html=True)
+    brand_col, text_col = st.columns([1.15, 4.85])
 
-    user_col, logout_col = st.sidebar.columns([2, 1])
-    user_col.write(f"**{st.session_state.auth_user_email}**")
-    if logout_col.button("Выйти", key="sidebar_logout"):
+    with brand_col:
+        if st.button("AI-Analitics", key="brand_logo_btn", use_container_width=True):
+            reset_to_home_screen()
+            st.rerun()
+
+    with text_col:
+        st.markdown("<div class='top-nav-title'>Аналитическое рабочее пространство</div>", unsafe_allow_html=True)
+        st.markdown(
+            "<div class='top-nav-subtitle'>Клик по бренду слева возвращает на главный экран.</div>",
+            unsafe_allow_html=True,
+        )
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+def render_control_panel_header() -> None:
+    st.markdown("<div class='panel-title'>Панель управления</div>", unsafe_allow_html=True)
+    st.markdown(
+        "<div class='control-panel-caption'>Источники данных, сессии и параметры дашбордов</div>",
+        unsafe_allow_html=True,
+    )
+
+    user_col, logout_col = st.columns([2, 1])
+    user_col.caption(f"Пользователь: {st.session_state.auth_user_email}")
+    if logout_col.button("Выйти", key="panel_logout", use_container_width=True):
         clear_auth_state()
         st.rerun()
 
-    st.sidebar.markdown("---")
 
-
-def render_sidebar_dashboard_controls(metric_options: dict[str, str], group_options: dict[str, str]) -> dict[str, Any]:
-    st.sidebar.markdown("### Дашборды")
-    enabled = st.sidebar.checkbox("Включить дашборды", value=st.session_state.dashboard_enabled)
+def render_dashboard_controls(metric_options: dict[str, str], group_options: dict[str, str]) -> dict[str, Any]:
+    st.markdown("### Дашборды")
+    enabled = st.checkbox("Включить дашборды", value=st.session_state.dashboard_enabled)
     st.session_state.dashboard_enabled = enabled
 
     group_keys = list(group_options.keys()) or ["campaign"]
     if st.session_state.dashboard_group_field not in group_keys:
         st.session_state.dashboard_group_field = group_keys[0]
 
-    selected_group = st.sidebar.selectbox(
+    selected_group = st.selectbox(
         "Группировка",
         options=group_keys,
         index=group_keys.index(st.session_state.dashboard_group_field),
@@ -874,7 +997,7 @@ def render_sidebar_dashboard_controls(metric_options: dict[str, str], group_opti
     if st.session_state.dashboard_metric_key not in metric_keys:
         st.session_state.dashboard_metric_key = metric_keys[0]
 
-    selected_metric = st.sidebar.selectbox(
+    selected_metric = st.selectbox(
         "Метрика графика",
         options=metric_keys,
         index=metric_keys.index(st.session_state.dashboard_metric_key),
@@ -886,7 +1009,7 @@ def render_sidebar_dashboard_controls(metric_options: dict[str, str], group_opti
     if st.session_state.dashboard_chart_type not in chart_types:
         st.session_state.dashboard_chart_type = "bar"
 
-    selected_chart_type = st.sidebar.selectbox(
+    selected_chart_type = st.selectbox(
         "Тип графика",
         options=chart_types,
         index=chart_types.index(st.session_state.dashboard_chart_type),
@@ -894,8 +1017,8 @@ def render_sidebar_dashboard_controls(metric_options: dict[str, str], group_opti
     )
     st.session_state.dashboard_chart_type = selected_chart_type
 
-    top_n = st.sidebar.slider("Top-N", min_value=3, max_value=25, value=int(st.session_state.dashboard_top_n))
-    weak_only = st.sidebar.checkbox("Только слабые объявления", value=st.session_state.dashboard_weak_only)
+    top_n = st.slider("Top-N", min_value=3, max_value=25, value=int(st.session_state.dashboard_top_n))
+    weak_only = st.checkbox("Только слабые объявления", value=st.session_state.dashboard_weak_only)
 
     st.session_state.dashboard_top_n = int(top_n)
     st.session_state.dashboard_weak_only = weak_only
@@ -1018,8 +1141,26 @@ def render_saved_payload_overview(payload: dict[str, Any]) -> None:
         st.write(f"- {tip}")
 
 
+def render_home_preview() -> None:
+    st.info("Это главный экран AI-Analitics. Для анализа загрузите файл в правой панели или откройте сохраненную сессию.")
+
+    preview_tabs = st.tabs(["Главная", "AI-ассистент", "История"])
+    with preview_tabs[0]:
+        st.markdown("### Что вы получите после анализа")
+        st.write("- Расширенные KPI для управленческих решений")
+        st.write("- Сегментацию по каналу, кампании, устройству и гео")
+        st.write("- Воронку, удержание, unit-экономику и сравнение периодов")
+        st.write("- Рекомендации по оптимизации маркетинга")
+
+    with preview_tabs[1]:
+        show_chat_assistant()
+
+    with preview_tabs[2]:
+        render_history_tab()
+
+
 def main() -> None:
-    st.set_page_config(page_title="Marketing AI Auditor", page_icon="📊", layout="wide")
+    st.set_page_config(page_title="AI-Analitics", page_icon="📊", layout="wide")
     inject_base_styles()
     init_app_state()
 
@@ -1029,135 +1170,135 @@ def main() -> None:
         st.error(str(error))
         st.stop()
 
-    st.title("📊 Marketing AI Auditor")
-    st.caption("Сводка сначала, детали по требованию: рабочее пространство для маркетологов и аналитиков.")
+    render_top_navigation()
 
     if not st.session_state.is_authenticated:
         show_auth_block()
         st.stop()
 
-    render_sidebar_header()
+    main_col, control_col = st.columns([3.4, 1.28], gap="large")
 
-    st.sidebar.markdown("### Источник данных")
-    uploaded_file = st.sidebar.file_uploader(
-        "Загрузите файл",
-        type=SUPPORTED_UPLOAD_TYPES,
-        help="Поддерживаются: .csv, .xlsx, .xls, .json, .sql, .sqlite, .sqlite3, .db",
-    )
-
+    uploaded_file: Any | None = None
     source_selection: dict[str, str] = {}
-    source_info: dict[str, Any] | None = None
 
-    if uploaded_file:
-        try:
-            source_info = inspect_source(uploaded_file.name, uploaded_file.getvalue())
-            st.sidebar.caption(f"Определен тип: {source_info.get('source_type', '-')}")
-            with st.sidebar.expander("Параметры источника", expanded=True):
-                selection = render_source_options(source_info)
-                if selection is None:
+    with control_col:
+        with st.container(border=True):
+            render_control_panel_header()
+
+            st.markdown("---")
+            st.markdown("### Источник данных")
+            uploader_key = f"control_file_uploader_{st.session_state.uploader_nonce}"
+            uploaded_file = st.file_uploader(
+                "Загрузите файл",
+                type=SUPPORTED_UPLOAD_TYPES,
+                help="Поддерживаются: .csv, .xlsx, .xls, .json, .sql, .sqlite, .sqlite3, .db",
+                key=uploader_key,
+            )
+
+            if uploaded_file:
+                try:
+                    source_info = inspect_source(uploaded_file.name, uploaded_file.getvalue())
+                    st.caption(f"Определен тип: {source_info.get('source_type', '-')}")
+                    with st.expander("Параметры источника", expanded=True):
+                        selection = render_source_options(source_info)
+                        if selection is None:
+                            st.stop()
+                        source_selection = selection
+                except FileLoadError as error:
+                    st.error(str(error))
                     st.stop()
-                source_selection = selection
-        except FileLoadError as error:
-            st.error(str(error))
-            st.stop()
-        except Exception:
-            st.error("Не удалось определить тип источника данных.")
-            st.stop()
+                except Exception:
+                    st.error("Не удалось определить тип источника данных.")
+                    st.stop()
 
-    st.sidebar.markdown("---")
-    st.sidebar.markdown("### Сессии")
-    open_session_from_sidebar()
+            st.markdown("---")
+            st.markdown("### Сессии")
+            open_session_from_panel()
 
+    analysis_data: dict[str, Any] | None = None
     dashboard_metric_options = {"spend": "Расход"}
     dashboard_group_options = {"campaign": "Кампания", "ad_name": "Объявление"}
 
-    analysis_data: dict[str, Any] | None = None
+    with main_col:
+        if uploaded_file:
+            analysis_data = process_uploaded_file(uploaded_file, source_selection)
+            if analysis_data:
+                st.session_state.show_home_screen = False
+                dashboard_metric_options = get_dashboard_metric_labels(
+                    analysis_data["analyzed_df"], analysis_data["metrics_info"]
+                )
+                dashboard_group_options = get_dashboard_group_options(analysis_data["analyzed_df"])
 
-    if uploaded_file:
-        analysis_data = process_uploaded_file(uploaded_file, source_selection)
+    with control_col:
+        with st.container(border=True):
+            dashboard_settings = render_dashboard_controls(dashboard_metric_options, dashboard_group_options)
+
+    with main_col:
+        if st.session_state.show_home_screen:
+            render_home_preview()
+            return
+
         if analysis_data:
-            dashboard_metric_options = get_dashboard_metric_labels(
-                analysis_data["analyzed_df"], analysis_data["metrics_info"]
-            )
-            dashboard_group_options = get_dashboard_group_options(analysis_data["analyzed_df"])
-
-    dashboard_settings = render_sidebar_dashboard_controls(dashboard_metric_options, dashboard_group_options)
-
-    if analysis_data:
-        tabs = st.tabs(
-            [
-                "Overview",
-                "Data Mapping",
-                "Metrics & Results",
-                "Dashboards",
-                "Recommendations",
-                "AI Assistant",
-                "History",
-            ]
-        )
-
-        with tabs[0]:
-            render_overview_tab(
-                summary_kpis=analysis_data["summary_kpis"],
-                analyzed_df=analysis_data["analyzed_df"],
-                metrics_info=analysis_data["metrics_info"],
-                recommendations=analysis_data["recommendations"],
+            tabs = st.tabs(
+                [
+                    "Обзор",
+                    "Сопоставление данных",
+                    "Метрики и результаты",
+                    "BI-дэшборд",
+                    "Рекомендации",
+                    "AI-ассистент",
+                    "История",
+                ]
             )
 
-        with tabs[1]:
-            render_mapping_tab(analysis_data["mapping_data"], analysis_data["source_metadata"])
+            with tabs[0]:
+                render_overview_tab(
+                    summary_kpis=analysis_data["summary_kpis"],
+                    analyzed_df=analysis_data["analyzed_df"],
+                    metrics_info=analysis_data["metrics_info"],
+                    recommendations=analysis_data["recommendations"],
+                )
 
-        with tabs[2]:
-            render_results_tab(analysis_data["analyzed_df"], analysis_data["metrics_info"])
+            with tabs[1]:
+                render_mapping_tab(analysis_data["mapping_data"], analysis_data["source_metadata"])
 
-        with tabs[3]:
-            render_dashboard_section(
-                analysis_data["analyzed_df"],
-                analysis_data["metrics_info"],
-                enabled=dashboard_settings["enabled"],
-                group_field=dashboard_settings["group_field"],
-                metric_key=dashboard_settings["metric_key"],
-                chart_type=dashboard_settings["chart_type"],
-                top_n=dashboard_settings["top_n"],
-                weak_only=dashboard_settings["weak_only"],
-            )
+            with tabs[2]:
+                render_results_tab(analysis_data["analyzed_df"], analysis_data["metrics_info"])
 
-        with tabs[4]:
-            render_recommendations_tab(analysis_data["recommendations"])
+            with tabs[3]:
+                render_dashboard_section(
+                    analysis_data["analyzed_df"],
+                    analysis_data["metrics_info"],
+                    enabled=dashboard_settings["enabled"],
+                    group_field=dashboard_settings["group_field"],
+                    metric_key=dashboard_settings["metric_key"],
+                    chart_type=dashboard_settings["chart_type"],
+                    top_n=dashboard_settings["top_n"],
+                    weak_only=dashboard_settings["weak_only"],
+                )
 
-        with tabs[5]:
-            show_chat_assistant()
+            with tabs[4]:
+                render_recommendations_tab(analysis_data["recommendations"])
 
-        with tabs[6]:
-            render_history_tab()
+            with tabs[5]:
+                show_chat_assistant()
 
-        return
+            with tabs[6]:
+                render_history_tab()
 
-    if st.session_state.active_analysis_payload and not uploaded_file:
-        tabs = st.tabs(["Overview", "AI Assistant", "History"])
-        with tabs[0]:
-            render_saved_payload_overview(st.session_state.active_analysis_payload)
-        with tabs[1]:
-            show_chat_assistant()
-        with tabs[2]:
-            render_history_tab()
-        return
+            return
 
-    st.info("Загрузите файл для анализа или откройте сохраненную сессию в боковой панели.")
+        if st.session_state.active_analysis_payload and not uploaded_file:
+            tabs = st.tabs(["Обзор", "AI-ассистент", "История"])
+            with tabs[0]:
+                render_saved_payload_overview(st.session_state.active_analysis_payload)
+            with tabs[1]:
+                show_chat_assistant()
+            with tabs[2]:
+                render_history_tab()
+            return
 
-    preview_tabs = st.tabs(["Overview", "AI Assistant", "History"])
-    with preview_tabs[0]:
-        st.markdown("### Что вы получите после анализа")
-        st.write("- Сводные KPI и сигналы риска")
-        st.write("- Сильные и слабые объявления")
-        st.write("- Детализированные метрики и рекомендации")
-        st.write("- Опциональные дашборды и AI-разбор")
-
-    with preview_tabs[1]:
-        show_chat_assistant()
-
-    with preview_tabs[2]:
-        render_history_tab()
+        render_home_preview()
 
 
 if __name__ == "__main__":
