@@ -1,54 +1,169 @@
 from __future__ import annotations
 
 import os
+import ssl
+from typing import Any
 
-import google.generativeai as genai
 from dotenv import load_dotenv
+from gigachat import GigaChat
 
 load_dotenv()
 
 SYSTEM_PROMPT = (
     "Ты маркетинговый AI-помощник. Отвечай только на русском языке, "
-    "кратко и по делу. Давай практичные рекомендации для рекламных кампаний, "
-    "креативов, аудиторий, воронки и аналитики."
+    "кратко, конкретно и строго по данным кампании."
 )
 
-DEFAULT_MODEL = "gemini-1.5-flash"
+OPTIMIZATION_KEYWORDS = [
+    "улучш",
+    "улучши",
+    "сниз",
+    "снизи",
+    "cpa",
+    "ctr",
+    "cvr",
+    "cpm",
+    "roas",
+    "roi",
+    "romi",
+    "cac",
+    "cpl",
+    "бюджет",
+    "перераспред",
+    "масштаб",
+    "оптимиз",
+    "эффектив",
+    "результат",
+]
+
+DEFAULT_GIGACHAT_SCOPE = "GIGACHAT_API_PERS"
 
 
-def get_api_key() -> str:
-    """Возвращает API-ключ Gemini из переменной окружения."""
-    api_key = os.getenv("GEMINI_API_KEY", "").strip()
-    if not api_key:
-        raise RuntimeError(
-            "Не найден GEMINI_API_KEY. Добавьте ключ в файл .env и перезапустите приложение."
+def get_env(name: str, required: bool = True, default: str = "") -> str:
+    value = os.getenv(name, default).strip()
+    if required and not value:
+        raise RuntimeError(f"Не найдена переменная окружения: {name}")
+    return value
+
+
+def is_optimization_question(user_message: str) -> bool:
+    text = user_message.strip().lower()
+    return any(keyword in text for keyword in OPTIMIZATION_KEYWORDS)
+
+
+def build_prompt(user_message: str, campaign_context: str = "") -> str:
+    question = user_message.strip()
+    context = campaign_context.strip()
+
+    if context:
+        base_rules = (
+            f"{SYSTEM_PROMPT}\n\n"
+            "Ниже дан контекст по текущей загруженной и проанализированной рекламной кампании. "
+            "Отвечай только на основе этого контекста.\n\n"
+            "Жесткие правила ответа:\n"
+            "1) Используй только факты из блока 'Контекст кампании'. Нельзя придумывать данные.\n"
+            "2) Обязательно ссылайся на конкретные объявления (campaign / ad_name), когда даешь выводы.\n"
+            "3) Обязательно указывай конкретные значения метрик из контекста.\n"
+            "4) Избегай общих советов, если в контексте есть данные для точечных выводов.\n"
+            "5) Если метрика недоступна, явно объясни, каких полей не хватило в исходном CSV.\n"
+            "6) Пиши структурированно короткими пунктами.\n"
         )
-    return api_key
+
+        if is_optimization_question(question):
+            return (
+                f"{base_rules}\n"
+                "Для этого вопроса используй формат:\n"
+                "1) Что проседает и почему\n"
+                "2) Какие объявления остановить/переработать\n"
+                "3) Какие объявления масштабировать\n"
+                "4) Что сделать в ближайшие 3 шага\n\n"
+                "В каждом разделе указывай конкретные объявления и метрики из контекста.\n\n"
+                f"Контекст кампании:\n{context}\n\n"
+                f"Вопрос пользователя: {question}"
+            )
+
+        return (
+            f"{base_rules}\n"
+            "Ответ должен опираться на цифры и объявления из контекста.\n\n"
+            f"Контекст кампании:\n{context}\n\n"
+            f"Вопрос пользователя: {question}"
+        )
+
+    return (
+        f"{SYSTEM_PROMPT}\n\n"
+        "Контекст кампании отсутствует. Дай общий ответ по маркетингу и явно укажи, "
+        "что для точных рекомендаций нужно загрузить CSV кампании.\n\n"
+        f"Вопрос пользователя: {question}"
+    )
 
 
-def build_prompt(user_message: str) -> str:
-    """Собирает итоговый промпт для модели Gemini."""
-    return f"{SYSTEM_PROMPT}\n\nВопрос пользователя: {user_message}"
+def create_gigachat_client() -> GigaChat:
+    credentials = get_env("GIGACHAT_CREDENTIALS")
+    scope = get_env("GIGACHAT_SCOPE", required=False, default=DEFAULT_GIGACHAT_SCOPE)
+    ca_bundle_file = get_env("GIGACHAT_CA_BUNDLE_FILE", required=False, default="")
+
+    client_options: dict[str, Any] = {
+        "credentials": credentials,
+        "scope": scope,
+        "verify_ssl_certs": True,
+    }
+    if ca_bundle_file:
+        client_options["ca_bundle_file"] = ca_bundle_file
+
+    return GigaChat(**client_options)
 
 
-def get_llm_response(user_message: str) -> str:
-    """Получает краткий ответ модели Gemini на русском языке."""
+def extract_answer_text(response: Any) -> str:
+    if response is None:
+        return ""
+
+    choices = getattr(response, "choices", None)
+    if choices and len(choices) > 0:
+        first_choice = choices[0]
+        message = getattr(first_choice, "message", None)
+        if message is not None:
+            return str(getattr(message, "content", "")).strip()
+        return str(getattr(first_choice, "text", "")).strip()
+
+    return str(response).strip() if isinstance(response, str) else ""
+
+
+def get_llm_response(user_message: str, campaign_context: str = "") -> str:
     message = user_message.strip()
     if not message:
         return "Введите вопрос, и я помогу с маркетингом."
 
-    genai.configure(api_key=get_api_key())
-    model = genai.GenerativeModel(model_name=DEFAULT_MODEL)
-
     try:
-        response = model.generate_content(build_prompt(message))
-    except Exception as error:
+        prompt = build_prompt(message, campaign_context=campaign_context)
+        with create_gigachat_client() as client:
+            response = client.chat(prompt)
+
+        answer = extract_answer_text(response)
+        if not answer:
+            raise RuntimeError(
+                "GigaChat вернул пустой ответ. Попробуйте переформулировать запрос или повторить позже."
+            )
+
+        return answer
+
+    except RuntimeError:
+        raise
+    except ssl.SSLError as error:
         raise RuntimeError(
-            "Не удалось получить ответ от Gemini API. Проверьте ключ, интернет и повторите попытку."
+            "Ошибка SSL при подключении к GigaChat. Проверьте сертификаты и переменную GIGACHAT_CA_BUNDLE_FILE."
         ) from error
+    except Exception as error:
+        error_text = str(error).strip()
+        lowered = error_text.lower()
 
-    answer = (response.text or "").strip()
-    if not answer:
-        raise RuntimeError("Модель вернула пустой ответ. Попробуйте переформулировать запрос.")
+        if "ssl" in lowered or "certificate" in lowered or "cert" in lowered:
+            raise RuntimeError(
+                "Не удалось установить безопасное SSL-соединение с GigaChat. Проверьте сертификаты и сетевую среду."
+            ) from error
 
-    return answer
+        if "401" in lowered or "403" in lowered or "unauthorized" in lowered or "forbidden" in lowered:
+            raise RuntimeError(
+                "Ошибка авторизации в GigaChat. Проверьте корректность GIGACHAT_CREDENTIALS и GIGACHAT_SCOPE."
+            ) from error
+
+        raise RuntimeError(f"Ошибка запроса к GigaChat: {error_text or 'неизвестная ошибка'}") from error

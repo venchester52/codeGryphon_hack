@@ -1,4 +1,9 @@
 streamlit>=1.37.0
 pandas>=2.2.0
-google-generativeai>=0.8.3
+gigachat>=0.1.31
 python-dotenv>=1.0.1
+SQLAlchemy>=2.0.32
+passlib[argon2]>=1.7.4
+argon2-cffi>=23.1.0
+openpyxl>=3.1.2
+xlrd>=2.0.1

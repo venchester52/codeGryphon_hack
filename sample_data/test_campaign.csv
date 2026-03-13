@@ -1,0 +1,16 @@
+campaign,ad_name,impressions,clicks,spend,conversions
+Search_Brand,Brand_Exact_3,11500,880,790,128
+Search_Brand,Brand_Broad_1,8700,620,610,95
+Search_Brand,Brand_Broad_2,7600,540,530,78
+Search_Generic,Generic_MidIntent_1,16200,700,1420,88
+Search_Generic,Generic_MidIntent_2,12800,610,1280,79
+Search_Generic,Generic_LowIntent_2,13500,190,1390,7
+Social_Retargeting,Retargeting_Creative_C,17200,940,1080,158
+Social_Retargeting,Retargeting_Video_A,15800,810,970,130
+Social_Retargeting,Retargeting_Video_B,14600,720,900,110
+Social_Prospecting,Prospecting_Carousel_A,25000,660,1750,45
+Social_Prospecting,Prospecting_Carousel_B,21500,570,1620,38
+Social_Prospecting,Prospecting_Static_2,20000,240,1350,9
+Display_Awareness,Display_Banner_C,33500,195,950,5
+Display_Awareness,Display_Video_A,28000,160,870,3
+Display_Awareness,Display_Video_B,30000,180,920,4
