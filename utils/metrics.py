@@ -124,10 +124,20 @@ def safe_divide(numerator: float, denominator: float) -> float:
     return float(numerator) / float(denominator)
 
 
+def _to_numeric_series(series: pd.Series) -> pd.Series:
+    """Преобразует серию в float с устойчивостью к pd.NA/object значениям."""
+    return pd.to_numeric(series, errors="coerce").fillna(0.0).astype(float)
+
+
 def _safe_ratio_series(numerator: pd.Series, denominator: pd.Series, multiplier: float = 1.0) -> pd.Series:
-    denominator_safe = denominator.replace(0, pd.NA)
-    result = numerator.astype(float).div(denominator_safe.astype(float)).fillna(0.0)
-    return result * multiplier
+    numerator_num = _to_numeric_series(numerator)
+    denominator_num = _to_numeric_series(denominator)
+
+    # Используем where вместо замены на pd.NA, чтобы избежать object-dtype
+    # и FutureWarning о silent downcasting на fillna.
+    denominator_safe = denominator_num.where(denominator_num != 0.0)
+    result = numerator_num.div(denominator_safe)
+    return result.fillna(0.0).astype(float) * multiplier
 
 
 def _select_revenue_field(available_fields: set[str]) -> str | None:
@@ -268,7 +278,11 @@ def build_metric_availability(available_fields: set[str]) -> dict[str, Any]:
     if "ltv_value" in available_fields:
         add_metric("ltv", ["ltv_value"], "avg(ltv_value)")
     elif revenue_field and {"customers", "repeat_purchases"}.issubset(available_fields):
-        add_metric("ltv", [revenue_field, "customers", "repeat_purchases"], f"({revenue_field} / customers) * (1 + repeat_purchases / customers)")
+        add_metric(
+            "ltv",
+            [revenue_field, "customers", "repeat_purchases"],
+            f"({revenue_field} / customers) * (1 + repeat_purchases / customers)",
+        )
     else:
         add_unavailable(
             "ltv",
@@ -427,7 +441,10 @@ def calculate_summary_kpis(df: pd.DataFrame, metrics_info: dict[str, Any]) -> di
             if "profit" in totals:
                 value = safe_divide(totals.get("profit", 0.0), totals.get("spend", 0.0)) * 100
             elif revenue_field:
-                value = safe_divide(totals.get(revenue_field, 0.0) - totals.get("spend", 0.0), totals.get("spend", 0.0)) * 100
+                value = (
+                    safe_divide(totals.get(revenue_field, 0.0) - totals.get("spend", 0.0), totals.get("spend", 0.0))
+                    * 100
+                )
         elif key == "aov" and revenue_field:
             value = safe_divide(totals.get(revenue_field, 0.0), totals.get("orders", 0.0))
         elif key == "ltv":

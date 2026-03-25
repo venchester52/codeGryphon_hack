@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import date, timedelta
 from typing import Any
 
 import pandas as pd
@@ -20,6 +21,13 @@ from db.crud import (
 )
 from db.database import SessionLocal, init_database
 from utils.analyzer import analyze_ads, generate_recommendations
+from utils.budget import build_budget_reallocation_suggestions
+from utils.comparison import (
+    DATE_SOURCE_MAPPED,
+    build_period_comparison,
+    infer_date_candidates,
+    resolve_analysis_dates,
+)
 from utils.dashboard import (
     CHART_TYPES,
     get_dashboard_group_options,
@@ -29,6 +37,7 @@ from utils.dashboard import (
 from utils.file_loader import FileLoadError, inspect_source, load_source_dataframe
 from utils.llm import get_llm_response
 from utils.metrics import METRIC_SPECS, add_performance_metrics, calculate_summary_kpis
+from utils.opportunities import build_opportunities
 from utils.schema_mapper import (
     INTERNAL_SCHEMA,
     build_internal_dataframe,
@@ -37,6 +46,8 @@ from utils.schema_mapper import (
     infer_column_mapping,
     validate_mapping,
 )
+from utils.segmentation import build_segmentation_report, detect_available_segment_dimensions
+from utils.overview_screen import render_overview_screen
 
 
 SUPPORTED_UPLOAD_TYPES = ["csv", "xlsx", "xls", "json", "sql", "sqlite", "sqlite3", "db"]
@@ -229,6 +240,8 @@ def build_campaign_context(
     analyzed_df: pd.DataFrame,
     recommendations: list[str],
     metrics_info: dict[str, Any],
+    budget_report: dict[str, Any] | None = None,
+    opportunities_report: dict[str, Any] | None = None,
 ) -> str:
     calculated_metrics = metrics_info.get("calculated", [])
     unavailable_metrics = metrics_info.get("unavailable", [])
@@ -285,6 +298,21 @@ def build_campaign_context(
             for _, row in weak_ads.iterrows():
                 lines.append(format_ad_metric_block(row, [key]))
 
+        lines.append("")
+
+    if budget_report and budget_report.get("available") and budget_report.get("suggestions"):
+        lines.append("Бюджетные возможности:")
+        for suggestion in budget_report.get("suggestions", [])[:3]:
+            lines.append(f"- {suggestion.get('action', '')}: {suggestion.get('reason', '')}")
+        lines.append("")
+
+    if opportunities_report and opportunities_report.get("available") and opportunities_report.get("opportunities"):
+        lines.append("Найденные возможности роста:")
+        for item in opportunities_report.get("opportunities", [])[:4]:
+            lines.append(
+                f"- {item.get('entity', '-')} — {item.get('pattern', '')}. "
+                f"{item.get('explanation', '')} {item.get('action', '')}"
+            )
         lines.append("")
 
     lines.append("Текущие рекомендации:")
@@ -825,37 +853,6 @@ def render_overview_tab(
         else:
             st.write("- Рекомендации пока не сформированы.")
 
-    st.markdown("#### Сильные и слабые сигналы")
-    signal_metrics = [item for item in metrics_info.get("calculated", []) if item["key"] in analyzed_df.columns][:2]
-    if not signal_metrics:
-        st.info("Сигналы недоступны: недостаточно метрик для ранжирования.")
-        return
-
-    left_col, right_col = st.columns(2)
-    for metric in signal_metrics:
-        key = metric["key"]
-        label = metric["label"]
-        direction = metric["direction"]
-
-        best_df = select_metric_ranking(analyzed_df, key, "higher" if direction == "higher" else "lower", limit=3)
-        weak_df = select_metric_ranking(analyzed_df, key, "lower" if direction == "higher" else "higher", limit=3)
-
-        with left_col:
-            st.markdown(f"**Лучшие по {label}**")
-            if best_df.empty:
-                st.write("- Недостаточно данных.")
-            else:
-                for _, row in best_df.iterrows():
-                    st.write(format_ad_metric_block(row, [key]))
-
-        with right_col:
-            st.markdown(f"**Слабые по {label}**")
-            if weak_df.empty:
-                st.write("- Недостаточно данных.")
-            else:
-                for _, row in weak_df.iterrows():
-                    st.write(format_ad_metric_block(row, [key]))
-
 
 def render_results_tab(analyzed_df: pd.DataFrame, metrics_info: dict[str, Any]) -> None:
     st.markdown("### Метрики и результаты")
@@ -875,25 +872,196 @@ def render_results_tab(analyzed_df: pd.DataFrame, metrics_info: dict[str, Any]) 
     st.markdown("#### Таблица результатов")
     st.dataframe(build_results_table(analyzed_df, metrics_info), use_container_width=True)
 
-    weak_df = analyzed_df[analyzed_df["is_weak"]].copy() if "is_weak" in analyzed_df.columns else pd.DataFrame()
-    strong_df = analyzed_df[~analyzed_df["is_weak"]].copy() if "is_weak" in analyzed_df.columns else pd.DataFrame()
 
-    col_weak, col_strong = st.columns(2)
-    with col_weak:
-        st.markdown("#### Слабые объявления")
-        if weak_df.empty:
-            st.write("Слабые объявления не найдены.")
-        else:
-            display_cols = [col for col in ["campaign", "ad_name", "spend", "weak_reasons"] if col in weak_df.columns]
-            st.dataframe(weak_df[display_cols].head(15), use_container_width=True)
+def _render_period_window(window: Any) -> None:
+    st.caption(
+        "Текущий период: "
+        f"{window.current_start.strftime('%Y-%m-%d')} — {window.current_end.strftime('%Y-%m-%d')} | "
+        "Предыдущий период: "
+        f"{window.previous_start.strftime('%Y-%m-%d')} — {window.previous_end.strftime('%Y-%m-%d')}"
+    )
 
-    with col_strong:
-        st.markdown("#### Лучшие объявления")
-        if strong_df.empty:
-            st.write("Недостаточно данных для выделения сильных объявлений.")
-        else:
-            display_cols = [col for col in ["campaign", "ad_name", "spend"] if col in strong_df.columns]
-            st.dataframe(strong_df[display_cols].head(15), use_container_width=True)
+
+def render_period_comparison_section(
+    analyzed_df: pd.DataFrame,
+    raw_df: pd.DataFrame,
+    metrics_info: dict[str, Any],
+) -> None:
+    st.markdown("#### Сравнение периодов")
+
+    date_candidates = infer_date_candidates(raw_df)
+    date_source_options: list[str] = []
+    date_source_labels: dict[str, str] = {}
+
+    if "date" in analyzed_df.columns:
+        date_source_options.append(DATE_SOURCE_MAPPED)
+        date_source_labels[DATE_SOURCE_MAPPED] = "Дата из сопоставления (date)"
+
+    for candidate in date_candidates:
+        date_source_options.append(candidate)
+        date_source_labels[candidate] = f"Исходная колонка: {candidate}"
+
+    if not date_source_options:
+        st.info("Сравнение периодов недоступно: в данных не найдено подходящей колонки с датой.")
+        return
+
+    col_source, col_mode = st.columns([1.4, 1.0])
+    with col_source:
+        selected_source = st.selectbox(
+            "Источник даты",
+            options=date_source_options,
+            format_func=lambda key: date_source_labels.get(key, key),
+        )
+
+    mode_options = {
+        "custom": "Current vs previous",
+        "wow": "Week-over-Week (WoW)",
+        "mom": "Month-over-Month (MoM)",
+    }
+
+    with col_mode:
+        mode = st.selectbox(
+            "Режим сравнения",
+            options=list(mode_options.keys()),
+            format_func=lambda key: mode_options[key],
+        )
+
+    dates = resolve_analysis_dates(analyzed_df, raw_df, selected_source)
+    valid_dates = dates.dropna()
+    if valid_dates.empty:
+        st.info("Не удалось извлечь валидные даты для сравнения периодов.")
+        return
+
+    current_start: pd.Timestamp | None = None
+    current_end: pd.Timestamp | None = None
+
+    if mode == "custom":
+        min_date = valid_dates.min().date()
+        max_date = valid_dates.max().date()
+        default_end = max_date
+        default_start = max(min_date, default_end - timedelta(days=6))
+
+        selected_range = st.date_input(
+            "Текущий период",
+            value=(default_start, default_end),
+            min_value=min_date,
+            max_value=max_date,
+        )
+
+        if not isinstance(selected_range, tuple) or len(selected_range) != 2:
+            st.warning("Выберите полный диапазон дат для текущего периода.")
+            return
+
+        start_date, end_date = selected_range
+        if not isinstance(start_date, date) or not isinstance(end_date, date):
+            st.warning("Невалидный формат выбранного диапазона дат.")
+            return
+
+        current_start = pd.Timestamp(start_date)
+        current_end = pd.Timestamp(end_date)
+
+    comparison = build_period_comparison(
+        analyzed_df=analyzed_df,
+        dates=dates,
+        metrics_info=metrics_info,
+        mode=mode,
+        current_start=current_start,
+        current_end=current_end,
+    )
+
+    if not comparison.get("available"):
+        st.warning(comparison.get("reason", "Сравнение периодов недоступно."))
+        return
+
+    _render_period_window(comparison["window"])
+    comparison_table = comparison.get("comparison_table", pd.DataFrame())
+
+    if comparison_table.empty:
+        st.info("Метрики для сравнения недоступны в выбранном диапазоне.")
+    else:
+        display_table = comparison_table.copy()
+        numeric_cols = display_table.select_dtypes(include=["number"]).columns
+        for col in numeric_cols:
+            display_table[col] = display_table[col].round(2)
+        st.dataframe(display_table, use_container_width=True)
+
+    trend_df = comparison.get("trend_df", pd.DataFrame())
+    if not trend_df.empty and "_analysis_date" in trend_df.columns:
+        st.line_chart(trend_df.set_index("_analysis_date"))
+
+
+def _render_segmentation_block(analyzed_df: pd.DataFrame, metrics_info: dict[str, Any]) -> None:
+    st.markdown("#### Сегментация по доступным измерениям")
+
+    available_dims = detect_available_segment_dimensions(analyzed_df)
+    if not available_dims:
+        st.info("Сегментация недоступна: поля campaign/ad_name/source/geo/device не найдены.")
+        return
+
+    dim_labels = {
+        "campaign": "Кампания",
+        "ad_name": "Объявление",
+        "source": "Источник",
+        "geo": "Гео",
+        "device": "Устройство",
+    }
+
+    top_n = st.slider("Строк в таблице сегментации", min_value=5, max_value=30, value=12)
+
+    for dimension in available_dims:
+        label = dim_labels.get(dimension, dimension)
+        with st.expander(f"Сегментация по: {label}", expanded=False):
+            report = build_segmentation_report(analyzed_df, metrics_info, dimension=dimension, top_n=int(top_n))
+            if not report.get("available"):
+                st.info(report.get("reason", "Срез недоступен."))
+                continue
+
+            summary_table = report.get("summary_table", pd.DataFrame())
+            if isinstance(summary_table, pd.DataFrame) and not summary_table.empty:
+                st.dataframe(summary_table, use_container_width=True)
+            else:
+                st.info("Нет данных для таблицы сегментации.")
+
+
+def _render_budget_and_opportunity_block(analyzed_df: pd.DataFrame, metrics_info: dict[str, Any]) -> None:
+    st.markdown("#### Бюджет и точки роста")
+
+    budget_report = build_budget_reallocation_suggestions(analyzed_df, metrics_info)
+    if budget_report.get("available"):
+        st.markdown("**Куда сдвинуть бюджет (обоснование: ROAS / CPA / CAC)**")
+        suggestions = budget_report.get("suggestions", [])
+        if not suggestions:
+            st.info("Явные предложения не сформированы.")
+        for idx, item in enumerate(suggestions, start=1):
+            st.write(f"{idx}. **{item.get('entity', '-')}** — {item.get('action', '')}")
+            st.caption(item.get("reason", ""))
+    else:
+        st.info(budget_report.get("reason", "Перераспределение бюджета недоступно."))
+
+    st.markdown("**Автоматический поиск возможностей**")
+    opportunities_report = build_opportunities(analyzed_df, metrics_info)
+    if opportunities_report.get("available"):
+        opportunities = opportunities_report.get("opportunities", [])
+        if not opportunities:
+            st.info(opportunities_report.get("reason", "Явные точки роста не найдены."))
+        for idx, item in enumerate(opportunities, start=1):
+            st.write(f"{idx}. **{item.get('entity', '-')}** — {item.get('pattern', '')}")
+            st.caption(f"{item.get('explanation', '')} Рекомендация: {item.get('action', '')}")
+    else:
+        st.info(opportunities_report.get("reason", "Недостаточно данных для поиска возможностей."))
+
+
+def render_comparison_and_optimization_tab(
+    analyzed_df: pd.DataFrame,
+    raw_df: pd.DataFrame,
+    metrics_info: dict[str, Any],
+) -> None:
+    st.markdown("### Сравнение и оптимизация")
+    render_period_comparison_section(analyzed_df, raw_df, metrics_info)
+    st.markdown("---")
+    _render_segmentation_block(analyzed_df, metrics_info)
+    st.markdown("---")
+    _render_budget_and_opportunity_block(analyzed_df, metrics_info)
 
 
 def render_recommendations_tab(recommendations: list[str]) -> None:
@@ -1087,11 +1255,16 @@ def process_uploaded_file(uploaded_file: Any, source_selection: dict[str, str]) 
 
     summary_kpis = calculate_summary_kpis(analyzed_df, metrics_info)
     recommendations = generate_recommendations(analyzed_df, metrics_info)
+    budget_report = build_budget_reallocation_suggestions(analyzed_df, metrics_info)
+    opportunities_report = build_opportunities(analyzed_df, metrics_info)
+
     campaign_context = build_campaign_context(
         summary_kpis=summary_kpis,
         analyzed_df=analyzed_df,
         recommendations=recommendations,
         metrics_info=metrics_info,
+        budget_report=budget_report,
+        opportunities_report=opportunities_report,
     )
 
     try:
@@ -1113,6 +1286,7 @@ def process_uploaded_file(uploaded_file: Any, source_selection: dict[str, str]) 
 
     return {
         "original_filename": uploaded_file.name,
+        "raw_df": raw_df,
         "source_metadata": source_metadata,
         "mapping_data": {
             "mapping": mapping,
@@ -1122,6 +1296,8 @@ def process_uploaded_file(uploaded_file: Any, source_selection: dict[str, str]) 
         "metrics_info": metrics_info,
         "analyzed_df": analyzed_df,
         "recommendations": recommendations,
+        "budget_report": budget_report,
+        "opportunities_report": opportunities_report,
         "campaign_context": campaign_context,
     }
 
@@ -1245,6 +1421,7 @@ def main() -> None:
                     "Сопоставление данных",
                     "Метрики и результаты",
                     "BI-дэшборд",
+                    "Сравнение и оптимизация",
                     "Рекомендации",
                     "AI-ассистент",
                     "История",
@@ -1252,11 +1429,16 @@ def main() -> None:
             )
 
             with tabs[0]:
-                render_overview_tab(
+                render_overview_screen(
+                    original_filename=analysis_data["original_filename"],
                     summary_kpis=analysis_data["summary_kpis"],
                     analyzed_df=analysis_data["analyzed_df"],
                     metrics_info=analysis_data["metrics_info"],
                     recommendations=analysis_data["recommendations"],
+                    budget_report=analysis_data.get("budget_report", {}),
+                    opportunities_report=analysis_data.get("opportunities_report", {}),
+                    sessions=get_user_sessions(limit=12),
+                    reopen_session_callback=load_saved_session,
                 )
 
             with tabs[1]:
@@ -1278,12 +1460,19 @@ def main() -> None:
                 )
 
             with tabs[4]:
-                render_recommendations_tab(analysis_data["recommendations"])
+                render_comparison_and_optimization_tab(
+                    analyzed_df=analysis_data["analyzed_df"],
+                    raw_df=analysis_data["raw_df"],
+                    metrics_info=analysis_data["metrics_info"],
+                )
 
             with tabs[5]:
-                show_chat_assistant()
+                render_recommendations_tab(analysis_data["recommendations"])
 
             with tabs[6]:
+                show_chat_assistant()
+
+            with tabs[7]:
                 render_history_tab()
 
             return

@@ -11,10 +11,11 @@ ENTITY_PRIORITY = ["campaign", "ad_name", "source", "geo", "device"]
 
 def _resolve_entity_field(df: pd.DataFrame) -> str | None:
     for field in ENTITY_PRIORITY:
-        if field in df.columns:
-            non_empty = df[field].astype(str).str.strip().replace("", pd.NA).dropna()
-            if not non_empty.empty:
-                return field
+        if field not in df.columns:
+            continue
+        non_empty = df[field].astype(str).str.strip().replace("", pd.NA).dropna()
+        if not non_empty.empty:
+            return field
     return None
 
 
@@ -29,26 +30,58 @@ def _prepare_entity_aggregation(df: pd.DataFrame, entity_field: str) -> pd.DataF
     return work_df.groupby(entity_field, as_index=False)[numeric_columns].sum()
 
 
-def _select_efficiency_metric(aggregated_df: pd.DataFrame, metrics_info: dict[str, Any]) -> tuple[str | None, str]:
-    calculated_keys = set(metrics_info.get("calculated_keys", []))
-    metric_priority = [
-        ("roas", "higher"),
-        ("romi", "higher"),
-        ("cpa", "lower"),
-        ("cac", "lower"),
-        ("cpc", "lower"),
-        ("cvr", "higher"),
-    ]
-
-    for metric_key, direction in metric_priority:
-        if metric_key in calculated_keys and metric_key in aggregated_df.columns:
-            return metric_key, direction
-
-    return None, "higher"
+def _to_float(value: Any) -> float:
+    return float(pd.to_numeric(value, errors="coerce") or 0.0)
 
 
-def _metric_value(row: pd.Series, key: str) -> float:
-    return float(pd.to_numeric(row.get(key, 0.0), errors="coerce") or 0.0)
+def _format_metrics_reason(row: pd.Series, metric_keys: list[str]) -> str:
+    parts: list[str] = []
+
+    if "roas" in metric_keys and "roas" in row.index:
+        parts.append(f"ROAS={_to_float(row.get('roas')):.2f}x")
+    if "cpa" in metric_keys and "cpa" in row.index:
+        parts.append(f"CPA={_to_float(row.get('cpa')):.2f}")
+    if "cac" in metric_keys and "cac" in row.index:
+        parts.append(f"CAC={_to_float(row.get('cac')):.2f}")
+
+    if "spend" in row.index:
+        parts.append(f"spend={_to_float(row.get('spend')):.2f}")
+
+    if not parts:
+        return "Ключевые метрики эффективности недоступны."
+
+    return ", ".join(parts)
+
+
+def _choose_metric_basis(metrics_df: pd.DataFrame) -> list[str]:
+    basis: list[str] = []
+    for key in ["roas", "cpa", "cac"]:
+        if key in metrics_df.columns:
+            basis.append(key)
+    return basis
+
+
+def _score_entities(metrics_df: pd.DataFrame, metric_basis: list[str]) -> pd.DataFrame:
+    work_df = metrics_df.copy()
+    work_df["_score"] = 0.0
+
+    if "roas" in metric_basis:
+        roas_median = float(work_df["roas"].median())
+        work_df["_score"] += (work_df["roas"] >= roas_median).astype(float)
+
+    if "cpa" in metric_basis:
+        cpa_median = float(work_df["cpa"].median())
+        work_df["_score"] += (work_df["cpa"] <= cpa_median).astype(float)
+
+    if "cac" in metric_basis:
+        cac_median = float(work_df["cac"].median())
+        work_df["_score"] += (work_df["cac"] <= cac_median).astype(float)
+
+    if "spend" in work_df.columns:
+        spend_max = float(work_df["spend"].max()) or 1.0
+        work_df["_score"] += (work_df["spend"] / spend_max) * 0.15
+
+    return work_df
 
 
 def build_budget_reallocation_suggestions(
@@ -71,15 +104,13 @@ def build_budget_reallocation_suggestions(
         }
 
     metrics_df, _ = add_performance_metrics(grouped, set(grouped.columns))
-    efficiency_metric, direction = _select_efficiency_metric(metrics_df, metrics_info)
-
-    if efficiency_metric is None:
+    if "spend" not in metrics_df.columns:
         return {
             "available": False,
-            "reason": "В данных нет доступных метрик эффективности (ROAS/ROMI/CPA/CAC/CPC/CVR).",
+            "reason": "Невозможно оценить перераспределение бюджета: отсутствует spend.",
         }
 
-    spend_series = pd.to_numeric(metrics_df.get("spend", pd.Series([0] * len(metrics_df))), errors="coerce").fillna(0.0)
+    spend_series = pd.to_numeric(metrics_df["spend"], errors="coerce").fillna(0.0)
     total_spend = float(spend_series.sum())
     if total_spend <= 0:
         return {
@@ -87,88 +118,98 @@ def build_budget_reallocation_suggestions(
             "reason": "Невозможно предложить перераспределение: суммарный spend равен 0.",
         }
 
-    work_df = metrics_df.copy()
-    work_df["_spend_share"] = (spend_series / total_spend) * 100
+    metrics_df = metrics_df.copy()
+    metrics_df["_spend_share"] = (spend_series / total_spend) * 100
 
-    sort_ascending = direction == "lower"
-    ranked = work_df.sort_values(by=[efficiency_metric, "spend"], ascending=[sort_ascending, False])
+    metric_basis = _choose_metric_basis(metrics_df)
+    if not metric_basis:
+        return {
+            "available": False,
+            "reason": "В данных нет ROAS/CPA/CAC для обоснованного перераспределения бюджета.",
+        }
 
-    strong = ranked.head(min(5, len(ranked))).copy()
-    weak = ranked.tail(min(5, len(ranked))).copy().sort_values(
-        by=[efficiency_metric, "spend"], ascending=[not sort_ascending, False]
-    )
+    scored_df = _score_entities(metrics_df, metric_basis)
+    ranked_desc = scored_df.sort_values(by=["_score", "spend"], ascending=[False, False])
+    ranked_asc = scored_df.sort_values(by=["_score", "spend"], ascending=[True, False])
+
+    strong = ranked_desc.head(min(5, len(ranked_desc))).copy()
+    weak = ranked_asc.head(min(5, len(ranked_asc))).copy()
 
     suggestions: list[dict[str, str]] = []
 
-    if not weak.empty:
-        weak_row = weak.iloc[0]
-        weak_entity = str(weak_row.get(entity_field, "-"))
-        weak_metric_value = _metric_value(weak_row, efficiency_metric)
-        weak_spend_share = float(weak_row.get("_spend_share", 0.0))
+    if not strong.empty and not weak.empty:
+        best_row = strong.iloc[0]
+        worst_row = weak.iloc[0]
+
+        from_entity = str(worst_row.get(entity_field, "-"))
+        to_entity = str(best_row.get(entity_field, "-"))
+
         suggestions.append(
             {
-                "entity": weak_entity,
-                "action": "Снизить бюджет и запустить проверку гипотез",
+                "entity": f"{from_entity} → {to_entity}",
+                "action": "Перенести 10–20% бюджета от слабой сущности к сильной",
                 "reason": (
-                    f"Низкая эффективность по {efficiency_metric.upper()}={weak_metric_value:.2f}; "
-                    f"доля бюджета {weak_spend_share:.1f}%"
+                    f"Источник бюджета ({from_entity}): {_format_metrics_reason(worst_row, metric_basis)}; "
+                    f"получатель ({to_entity}): {_format_metrics_reason(best_row, metric_basis)}"
                 ),
             }
         )
 
-    if not strong.empty:
-        strong_row = strong.iloc[0]
-        strong_entity = str(strong_row.get(entity_field, "-"))
-        strong_metric_value = _metric_value(strong_row, efficiency_metric)
-        strong_spend_share = float(strong_row.get("_spend_share", 0.0))
-        suggestions.append(
-            {
-                "entity": strong_entity,
-                "action": "Увеличить бюджет поэтапно на 10–20%",
-                "reason": (
-                    f"Высокая эффективность по {efficiency_metric.upper()}={strong_metric_value:.2f}; "
-                    f"текущая доля бюджета {strong_spend_share:.1f}%"
-                ),
-            }
-        )
-
-    if "spend" in work_df.columns and not strong.empty:
-        low_spend_strong = strong.sort_values(by=["spend"], ascending=True).head(1)
-        if not low_spend_strong.empty:
-            row = low_spend_strong.iloc[0]
-            entity = str(row.get(entity_field, "-"))
-            spend_value = float(row.get("spend", 0.0))
-            metric_value = _metric_value(row, efficiency_metric)
+    if "roas" in metric_basis:
+        high_roas = scored_df.sort_values(by=["roas", "spend"], ascending=[False, True]).head(1)
+        if not high_roas.empty:
+            row = high_roas.iloc[0]
             suggestions.append(
                 {
-                    "entity": entity,
-                    "action": "Защитить и протестировать масштабирование",
-                    "reason": (
-                        f"Сильная эффективность при низком бюджете: spend={spend_value:.2f}, "
-                        f"{efficiency_metric.upper()}={metric_value:.2f}"
-                    ),
+                    "entity": str(row.get(entity_field, "-")),
+                    "action": "Плавно масштабировать бюджет при ежедневном контроле",
+                    "reason": f"Высокий ROAS с потенциалом роста: {_format_metrics_reason(row, metric_basis)}",
                 }
             )
 
-    if len(weak) >= 2 and len(strong) >= 2:
-        weak_entities = ", ".join([str(item) for item in weak[entity_field].head(2).tolist()])
-        strong_entities = ", ".join([str(item) for item in strong[entity_field].head(2).tolist()])
+    for key, label in [("cpa", "CPA"), ("cac", "CAC")]:
+        if key not in metric_basis:
+            continue
+        highest_cost = scored_df.sort_values(by=[key, "spend"], ascending=[False, False]).head(1)
+        if highest_cost.empty:
+            continue
+        row = highest_cost.iloc[0]
+        suggestions.append(
+            {
+                "entity": str(row.get(entity_field, "-")),
+                "action": "Ограничить бюджет до стабилизации экономики",
+                "reason": f"Завышенный {label}: {_format_metrics_reason(row, metric_basis)}",
+            }
+        )
+
+    if len(strong) >= 2 and len(weak) >= 2:
+        strong_entities = ", ".join([str(value) for value in strong[entity_field].head(2).tolist()])
+        weak_entities = ", ".join([str(value) for value in weak[entity_field].head(2).tolist()])
         suggestions.append(
             {
                 "entity": "Портфель кампаний",
-                "action": "Перераспределить 10–15% бюджета от слабых к сильным",
+                "action": "Собрать квартет тестов перераспределения бюджета",
                 "reason": (
-                    f"Слабые: {weak_entities}. Потенциальные драйверы роста: {strong_entities}."
+                    f"Перенаправить часть бюджета от {weak_entities} к {strong_entities} "
+                    "с контролем ROAS/CPA/CAC на 3–5 дней."
                 ),
             }
         )
+
+    unique_suggestions: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in suggestions:
+        signature = (item.get("entity", ""), item.get("action", ""))
+        if signature in seen:
+            continue
+        seen.add(signature)
+        unique_suggestions.append(item)
 
     return {
         "available": True,
         "entity_field": entity_field,
-        "efficiency_metric": efficiency_metric,
-        "direction": direction,
+        "metric_basis": metric_basis,
         "strong_table": strong,
         "weak_table": weak,
-        "suggestions": suggestions[:max_suggestions],
+        "suggestions": unique_suggestions[:max_suggestions],
     }

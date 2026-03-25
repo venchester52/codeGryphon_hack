@@ -16,16 +16,30 @@ def _to_float(value: Any) -> float:
         return 0.0
 
 
+def _metrics_keys(metrics_info: dict[str, Any], key: str) -> list[str]:
+    items = metrics_info.get(key, [])
+    if not isinstance(items, list):
+        return []
+
+    output: list[str] = []
+    for item in items:
+        if isinstance(item, dict):
+            value = str(item.get("key", "")).strip()
+            if value:
+                output.append(value)
+    return output
+
+
 def build_analysis_snapshot(
     original_filename: str,
     summary_kpis: dict[str, dict[str, Any]],
     metrics_info: dict[str, Any],
     recommendations: list[str],
     overview_report: dict[str, Any],
-    insight_cards: list[dict[str, str]],
+    insight_cards: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    available_metrics = [item.get("key", "") for item in metrics_info.get("calculated", []) if item.get("key")]
-    unavailable_metrics = [item.get("key", "") for item in metrics_info.get("unavailable", []) if item.get("key")]
+    available_metrics = _metrics_keys(metrics_info, "calculated")
+    unavailable_metrics = _metrics_keys(metrics_info, "unavailable")
 
     compact_kpis: dict[str, dict[str, Any]] = {}
     for key in SNAPSHOT_KPI_KEYS:
@@ -41,8 +55,8 @@ def build_analysis_snapshot(
     return {
         "created_at": datetime.utcnow().isoformat(),
         "original_filename": original_filename,
-        "status": overview_report.get("status", "mixed"),
-        "status_label": overview_report.get("status_label", "Смешанная"),
+        "status": overview_report.get("status", "warning"),
+        "status_label": overview_report.get("status_label", "Внимание"),
         "score": _to_float(overview_report.get("score", 0.0)),
         "summary_kpis": compact_kpis,
         "available_metrics": available_metrics,
@@ -68,15 +82,17 @@ def snapshot_from_session_payload(payload: dict[str, Any]) -> dict[str, Any]:
             "unit": item.get("unit", ""),
         }
 
+    metrics_info = payload.get("metrics_info", {})
+
     return {
         "created_at": str(payload.get("uploaded_at", "")),
         "original_filename": payload.get("original_filename", "uploaded_file"),
-        "status": "mixed",
+        "status": "warning",
         "status_label": "Историческая сессия",
         "score": 0.0,
         "summary_kpis": compact_kpis,
-        "available_metrics": payload.get("metrics_info", {}).get("calculated_keys", []),
-        "unavailable_metrics": payload.get("metrics_info", {}).get("unavailable_keys", []),
+        "available_metrics": _metrics_keys(metrics_info, "calculated"),
+        "unavailable_metrics": _metrics_keys(metrics_info, "unavailable"),
         "recommendations": payload.get("recommendations", [])[:6],
         "next_actions": [],
         "key_problems": [],
